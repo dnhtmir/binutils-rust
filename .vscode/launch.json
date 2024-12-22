@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Hexdump",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/${workspaceFolderBasename}",
+            "args": [
+                "hexdump",
+                "${workspaceFolder}/../../cursor/cursor-0.43.6-build-241206z7j6me2e2-x86_64.AppImage"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {},
+            "console": "integratedTerminal",
+            "preLaunchTask": "cargo build"
+        }
+    ]
+}
