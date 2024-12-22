@@ -1,76 +1,114 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap; // For ordered map
 use std::fs::File;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
+use tokio::task;
 
-fn main() {
+const FILE_CHUNK_SIZE: usize = 4096;
+const SPLIT_CHUNK_SIZE: usize = 16;
+
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    println!("Arguments {:?}", args);
-
-    let program_name: &String = &args[0];
-    println!("Program name: {}", program_name);
-
-    if args.len() > 1 {
-        for arg in &args[1..] {
-            println!("Argument: {}", arg);
-        }
-    } else {
-        println!("No additional arguments provided.");
-    }
-
-    if args.len() < 3 {
+    if args.len() != 3 {
+        eprintln!("Usage: {} hexdump <filename>", args[0]);
         return;
     }
 
     let command: &String = &args[1];
     match command.as_str() {
-        "hexdump" => hexdump(&args[2]),
+        "hexdump" => hexdump(&args[2]).await,
         _ => eprintln!("unknown command: {}", command),
     }
 }
 
-fn hexdump(filename: &String) {
-    let mut file: File = match File::open(filename) {
+async fn hexdump(filename: &String) {
+    let file = match File::open(filename) {
         Ok(f) => f,
         Err(err) => {
-            eprintln!("error opening file {}: {}", filename, err);
+            eprintln!("Error opening file {}: {}", filename, err);
             return;
         }
     };
 
-    let mut buffer: [u8; 2] = [0u8, 255];
-    let mut offset: usize = 0;
-    let mut map = HashMap::new();
+    // Shared map for storing results (ordered by offset using BTreeMap)
+    let map = Arc::new(Mutex::new(BTreeMap::new()));
 
-    println!("hexdump of file {}:", filename);
+    // Read the file in chunks
+    let mut buffer: [u8; FILE_CHUNK_SIZE] = [0u8; FILE_CHUNK_SIZE];
+    let mut file: File = file;
+    let mut offset: usize = 0;
+
+    println!("Hexdump of file {}:", filename);
+
     while let Ok(bytes_read) = file.read(&mut buffer) {
         if bytes_read == 0 {
             break;
         }
 
-        for chunk in buffer[..bytes_read].chunks(16) {
-            let offset_str = format!("{:08x}", offset - offset % 8);
+        let map = Arc::clone(&map);
+        let chunk = buffer[..bytes_read].to_vec();
+        let offset_start = offset;
 
-            let value = map
-                .entry(offset_str.clone())
-                .or_insert(("".to_string(), "".to_string()));
+        // Spawn a worker to process the chunk asynchronously
+        // TODO: improve worker orchestration
+        // TODO: make benchmark tests
+        // TODO: accept arguments for chunk sizes
+        // TODO: implement other functions
+        task::spawn(async move {
+            process_chunk(map, offset_start, &chunk).await;
+        });
 
-            for byte in &buffer[..bytes_read] {
-                value.0.push_str(&format!("{:02x}  ", byte));
-            }
+        offset += bytes_read;
+    }
 
-            for byte in chunk {
-                if byte.is_ascii_graphic() || *byte == b' ' {
-                    value.1.push_str(&format!("{}", *byte as char));
-                } else {
-                    value.1.push_str(".");
-                }
-            }
+    // Wait for all workers to finish
+    tokio::task::yield_now().await;
 
-            offset += chunk.len();
+    // Lock the map and print its ordered contents
+    let map = map.lock().unwrap();
+    for (offset, (hex_dump, ascii_dump)) in map.iter() {
+        println!("{:08x}: {} | {}", offset, hex_dump, ascii_dump);
+    }
+}
 
-            if offset % 8 == 0 {
-                println!("{}: {} | {}", offset_str, value.0, value.1);
-            }
+async fn process_chunk(
+    map: Arc<Mutex<BTreeMap<usize, (String, String)>>>,
+    offset_start: usize,
+    chunk: &[u8],
+) {
+    for (i, small_chunk) in chunk.chunks(SPLIT_CHUNK_SIZE).enumerate() {
+        let offset = offset_start + (i * 8); // Calculate the offset for the small chunk
+        process_small_chunks(Arc::clone(&map), offset, small_chunk).await;
+    }
+}
+
+async fn process_small_chunks(
+    map: Arc<Mutex<BTreeMap<usize, (String, String)>>>,
+    offset_start: usize,
+    chunk: &[u8],
+) {
+    let mut hex_dump: String = String::new();
+    let mut ascii_dump: String = String::new();
+
+    for (i, byte) in chunk.iter().enumerate() {
+        // Append hex representation
+        hex_dump.push_str(&format!("{:02x} ", byte));
+
+        // Append ASCII representation (printable or '.')
+        if byte.is_ascii_graphic() || *byte == b' ' {
+            ascii_dump.push(*byte as char);
+        } else {
+            ascii_dump.push('.');
+        }
+
+        // Add extra space for alignment after 8 bytes
+        if (i + 1) % 8 == 0 {
+            hex_dump.push_str(" ");
         }
     }
+
+    // Lock the map and insert the processed chunk
+    let mut map = map.lock().unwrap();
+    map.insert(offset_start, (hex_dump, ascii_dump));
 }
